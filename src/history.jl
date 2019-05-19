@@ -1,23 +1,35 @@
 # SimHistory
 # maintained by @zsunberg
 
-abstract type SimHistory end
-abstract type AbstractMDPHistory{S,A} <: SimHistory end
-abstract type AbstractPOMDPHistory{S,A,O,B} <: SimHistory end
-
 # Ordering of a complete step tuple:
 # (The general structure is (mdp core, t, mdp info, pomdp core, pomdp info))
 const COMPLETE_POMDP_STEP = (:s,:a,:r,:sp,:t,:i,:ai,:b,:o,:bp,:ui)
 const COMPLETE_MDP_STEP = COMPLETE_POMDP_STEP[1:7]
 
+const MDPStep{S,A} = NamedTuple{COMPLETE_MDP_STEP, Tuple{S,A,Float64,S,Int,Any,Any}}
+const POMDPStep{S,A,O,B} = NamedTuple{COMPLETE_POMDP_STEP, Tuple{S,A,Float64,S,Int,Any,Any,B,O,B,Any}}
+
+abstract type SimHistory{NT} <: AbstractVector{NT} end
+abstract type AbstractMDPHistory{S,A} <: SimHistory{MDPStep{S,A}} end
+abstract type AbstractPOMDPHistory{S,A,O,B} <: SimHistory{POMDPStep{S,A,O,B}} end
+
+nt_type(::Type{H}) where H<:SimHistory{NT} where NT = NT
+nt_type(h::SimHistory) = nt_type(typeof(h))
+
 """
-An object that contains a MDP simulation history
+    MDPHistory
 
-Returned by simulate when called with a HistoryRecorder. Iterate through the (s, a, r, s') tuples in MDPHistory h like this:
+An MDP simulation history returned by `simulate(::HistoryRecorder, ::MDP,...)`.
 
-    for (s, a, r, sp) in eachstep(h)
-        # do something
-    end
+This is an `AbstractVector` of `NamedTuples` containing the states, actions, etc.
+
+# Examples
+```
+hist[1][:s] # returns the first state in the history
+```
+```
+hist[:a] # returns all of the actions in the history
+```
 """
 struct MDPHistory{S,A} <: AbstractMDPHistory{S,A}
     state_hist::Vector{S}
@@ -34,13 +46,20 @@ struct MDPHistory{S,A} <: AbstractMDPHistory{S,A}
 end
 
 """
-An object that contains a POMDP simulation history
+    POMDPHistory
 
-Returned by simulate when called with a HistoryRecorder. Iterate through the (s, b, a, r, s', o) tuples in POMDPHistory h like this:
+An POMDP simulation history returned by `simulate(::HistoryRecorder, ::POMDP,...)`.
 
-    for (s, b, a, r, sp, o) in eachstep(h, "s,b,a,r,sp,o")
-        # do something
-    end
+This is an `AbstractVector` of `NamedTuples` containing the states, actions, etc.
+
+# Examples
+```
+hist[1][:s] # returns the first state in the history
+```
+```
+hist[:a] # returns all of the actions in the history
+```
+
 """
 struct POMDPHistory{S,A,O,B} <: AbstractPOMDPHistory{S,A,O,B}
     state_hist::Vector{S}
@@ -86,33 +105,64 @@ function discounted_reward(h::SimHistory)
     return r_total
 end
 
-# iteration
-Base.length(h::SimHistory) = n_steps(h)
-function Base.iterate(h::SimHistory, i::Int=1)
-    if i > n_steps(h)
-        return nothing 
-    else
-        return (step_tuple(h, i), i+1)
+
+# AbstractArray interface
+Base.size(h::SimHistory) = (n_steps(h),)
+
+function Base.getindex(h::MDPHistory, i::Int)
+    return nt_type(h)((state_hist(h)[i],
+                       action_hist(h)[i],
+                       reward_hist(h)[i],
+                       state_hist(h)[i+1],
+                       i,
+                       info_hist(h)[i],
+                       ainfo_hist(h)[i]
+                      ))
+end
+
+function Base.getindex(h::POMDPHistory, i::Int)
+    return nt_type(h)((state_hist(h)[i],
+                       action_hist(h)[i],
+                       reward_hist(h)[i],
+                       state_hist(h)[i+1],
+                       i,
+                       info_hist(h)[i],
+                       ainfo_hist(h)[i],
+                       belief_hist(h)[i],
+                       observation_hist(h)[i],
+                       belief_hist(h)[i+1],
+                       uinfo_hist(h)[i]
+                      ))
+end
+
+function Base.getindex(h::SimHistory, s::Symbol)
+    if s == :s
+        return state_hist(h)[1:end-1]
+    elseif s == :a
+        return action_hist(h)
+    elseif s == :r
+        return reward_hist(h)
+    elseif s == :sp
+        return state_hist(h)[2:end]
+    elseif s == :t
+        return 1:n_steps(h)
+    elseif s == :i
+        return info_hist(h)
+    elseif s == :ai
+        return ainfo_hist(h)
+    elseif s == :b
+        return belief_hist(h)[1:n_steps(h)]
+    elseif s == :o
+        return observation_hist(h)
+    elseif s == :bp
+        if length(belief_hist(h)) < n_steps(h)+1
+            @warn("Requested :bp from a SimHistory, however bp was not calculated for the last step so a shortened vector will be returned.")
+        end
+        return belief_hist(h)[2:end]
+    elseif s == :ui
+        return uinfo_hist(h)
     end
 end
-
-function step_tuple(h::MDPHistory, i::Int)
-    return (s=state_hist(h)[i],
-            a=action_hist(h)[i],
-            r=reward_hist(h)[i],
-            sp=state_hist(h)[i+1]
-           )
-end
-function step_tuple(h::POMDPHistory, i::Int)
-    return (s=state_hist(h)[i],
-            b=belief_hist(h)[i],
-            a=action_hist(h)[i],
-            r=reward_hist(h)[i],
-            sp=state_hist(h)[i+1],
-            o=observation_hist(h)[i]
-           )
-end
-
 
 
 const Inds = Union{AbstractRange,Colon,Real}
@@ -144,8 +194,6 @@ reward_hist(h::SubHistory) = reward_hist(h.parent)[h.inds]
 info_hist(h::SubHistory) = info_hist(h.parent)[h.inds]
 ainfo_hist(h::SubHistory) = ainfo_hist(h.parent)[h.inds]
 uinfo_hist(h::SubHistory) = uinfo_hist(h.parent)[h.inds]
-
-step_tuple(h::SubHistory, i::Int) = step_tuple(h.parent, h.inds[i])
 
 exception(h::SubHistory) = exception(h.parent)
 Base.backtrace(h::SubHistory) = backtrace(h.parent)
@@ -268,3 +316,24 @@ function Base.iterate(it::HistoryIterator, i::Int = 1)
         return (step_tuple(it, i), i+1)
     end
 end
+
+# hack so that histories display reasonably
+# copied from base library
+function Base.show(io::IO, t::Union{MDPStep, POMDPStep})
+    print(io, shortname(t))
+    print(io, "(")
+    n = nfields(t)
+    for i = 1:n
+        typeinfo = get(io, :typeinfo, Any)
+        print(io, fieldname(typeof(t),i), " = ")
+        show(IOContext(io, :typeinfo =>
+                       t isa typeinfo <: NamedTuple ? fieldtype(typeinfo, i) : Any),
+             getfield(t, i))
+        if i < n
+            print(io, ", ")
+        end
+    end
+    print(io, ")")
+end
+shortname(::MDPStep) = "MDPStep"
+shortname(::POMDPStep) = "POMDPStep"
