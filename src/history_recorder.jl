@@ -15,7 +15,6 @@ Keyword Arguments:
     - `show_progress::Bool`: show a progress bar for the simulation
     - `eps`
     - `max_steps`
-    - `sizehint::Int`: the expected length of the simulation (for preallocation)
 
 Usage (optional arguments in brackets):
 
@@ -32,17 +31,15 @@ mutable struct HistoryRecorder <: Simulator
     # optional: if these are null, they will be ignored
     max_steps::Union{Nothing,Any}
     eps::Union{Nothing,Any}
-    sizehint::Union{Nothing,Integer}
 end
 
 # This is the only stable constructor
 function HistoryRecorder(;rng=MersenneTwister(rand(UInt32)),
                           eps=nothing,
                           max_steps=nothing,
-                          sizehint=nothing,
                           capture_exception=false,
                           show_progress=false)
-    return HistoryRecorder(rng, capture_exception, show_progress, max_steps, eps, sizehint)
+    return HistoryRecorder(rng, capture_exception, show_progress, max_steps, eps)
 end
 
 @POMDP_require simulate(sim::HistoryRecorder, pomdp::POMDP, policy::Policy) begin
@@ -70,7 +67,7 @@ end
     @req initialize_belief(::typeof(bu), ::typeof(dist))
     @req isterminal(::P, ::S)
     @req discount(::P)
-    @req generate_sor(::P, ::S, ::A, ::typeof(sim.rng))
+    @req gen(::DDNOut{(:sp,:o,:r)}, ::P, ::S, ::A, ::typeof(sim.rng))
     b = initialize_belief(bu, dist)
     B = typeof(b)
     @req action(::typeof(policy), ::B)
@@ -86,82 +83,36 @@ function simulate(sim::HistoryRecorder,
                   ) where {S,A,O}
 
     initial_belief = initialize_belief(bu, initialstate_dist)
-    if sim.max_steps == nothing
-        max_steps = typemax(Int)
-    else
-        max_steps = sim.max_steps
-    end
+    max_steps = something(sim.max_steps, typemax(Int))
     if sim.eps != nothing
         max_steps = min(max_steps, ceil(Int,log(sim.eps)/log(discount(pomdp))))
     end
-    if sim.sizehint == nothing
-        sizehint = min(max_steps, 1000)
-    else
-        sizehint = sim.sizehint
-    end
-
-    # aliases for the histories to make the code more concise
-    sh = sizehint!(Vector{S}(undef, 0), sizehint)
-    ah = sizehint!(Vector{A}(undef, 0), sizehint)
-    oh = sizehint!(Vector{O}(undef, 0), sizehint)
-    bh = sizehint!(Vector{typeof(initial_belief)}(undef, 0), sizehint)
-    rh = sizehint!(Vector{Float64}(undef, 0), sizehint)
-    ih = sizehint!(Vector{Any}(undef, 0), sizehint)
-    aih = sizehint!(Vector{Any}(undef, 0), sizehint)
-    uih = sizehint!(Vector{Any}(undef, 0), sizehint)
-    exception = nothing
-    backtrace = nothing
-
-    push!(sh, is)
-    push!(bh, initial_belief)
-
+    
     if sim.show_progress
         if (sim.max_steps == nothing) && (sim.eps == nothing)
             error("If show_progress=true in a HistoryRecorder, you must also specify max_steps or eps.")
         end
         prog = Progress(max_steps, "Simulating..." )
+    else
+        prog = nothing
     end
 
-    disc = 1.0
-    step = 1
+    it = POMDPSimIterator(default_spec(pomdp),
+                          pomdp,
+                          policy,
+                          bu,
+                          sim.rng,
+                          initial_belief,
+                          is,
+                          max_steps)
 
-    try
-        while !isterminal(pomdp, sh[step]) && step <= max_steps
-            a, ai = action_info(policy, bh[step])
-            push!(ah, a)
-            push!(aih, ai)
-
-            sp, o, r, i = generate_sori(pomdp, sh[step], ah[step], sim.rng)
-
-            push!(sh, sp)
-            push!(oh, o)
-            push!(rh, r)
-            push!(ih, i)
-
-            bp, ui = update_info(bu, bh[step], ah[step], oh[step])
-            bh = push_belief(bh, bp)
-            push!(uih, ui)
-
-            step += 1
-
-            if sim.show_progress
-                next!(prog)
-            end
-        end
-    catch ex
-        if sim.capture_exception
-            exception = ex
-            backtrace = catch_backtrace()
-        else
-            rethrow(ex)
-        end
-    end
+    history, exception, backtrace = collect_history(it, Val(sim.capture_exception), prog)
 
     if sim.show_progress
         finish!(prog)
     end
 
-    return POMDPHistory(sh, ah, oh, bh, rh, ih, aih, uih, discount(pomdp), exception, backtrace)
+    return SimHistory(promote_history(history), discount(pomdp), exception, backtrace)
 end
 
 @POMDP_require simulate(sim::HistoryRecorder, mdp::MDP, policy::Policy) begin
@@ -175,7 +126,7 @@ end
     A = actiontype(mdp)
     @req isterminal(::P, ::S)
     @req action(::typeof(policy), ::S)
-    @req generate_sr(::P, ::S, ::A, ::typeof(sim.rng))
+    @req gen(::DDNOut{(:sp,:r)}, ::P, ::S, ::A, ::typeof(sim.rng))
     @req discount(::P)
 end
 
@@ -183,93 +134,80 @@ function simulate(sim::HistoryRecorder,
                   mdp::MDP{S,A}, policy::Policy,
                   init_state::S=initialstate(mdp, sim.rng)) where {S,A}
     
-    if sim.max_steps == nothing
-        max_steps = typemax(Int)
-    else
-        max_steps = sim.max_steps
-    end
+    max_steps = something(sim.max_steps, typemax(Int))
     if sim.eps != nothing
         max_steps = min(max_steps, ceil(Int,log(sim.eps)/log(discount(mdp))))
     end
-    if sim.sizehint == nothing
-        sizehint = min(max_steps, 1000)
-    else
-        sizehint = sim.sizehint
-    end
 
-    # aliases for the histories to make the code more concise
-    sh = sizehint!(Vector{S}(undef, 0), sizehint)
-    ah = sizehint!(Vector{A}(undef, 0), sizehint)
-    rh = sizehint!(Vector{Float64}(undef, 0), sizehint)
-    ih = sizehint!(Vector{Any}(undef, 0), sizehint)
-    aih = sizehint!(Vector{Any}(undef, 0), sizehint)
-    exception = nothing
-    backtrace = nothing
+    it = MDPSimIterator(default_spec(mdp),
+                        mdp,
+                        policy,
+                        sim.rng,
+                        init_state,
+                        max_steps)
 
     if sim.show_progress
         if (sim.max_steps == nothing) && (sim.eps == nothing)
             error("If show_progress=true in a HistoryRecorder, you must also specify max_steps or eps.")
         end
         prog = Progress(max_steps, "Simulating..." )
+    else
+        prog = nothing
     end
     
-    push!(sh, init_state)
-
-    disc = 1.0
-    step = 1
-
-    try
-        while !isterminal(mdp, sh[step]) && step <= max_steps
-            a, ai = action_info(policy, sh[step])
-            push!(ah, a)
-            push!(aih, ai)
-
-            sp, r, i = generate_sri(mdp, sh[step], ah[step], sim.rng)
-
-            push!(sh, sp)
-            push!(rh, r)
-            push!(ih, i)
-
-            disc *= discount(mdp)
-            step += 1
-
-            if sim.show_progress
-                next!(prog)
-            end
-        end
-    catch ex
-        if sim.capture_exception
-            exception = ex
-            backtrace = catch_backtrace()
-        else
-            rethrow(ex)
-        end
-    end
+    history, exception, backtrace = collect_history(it, Val(sim.capture_exception), prog)
 
     if sim.show_progress
         finish!(prog)
     end
 
-    return MDPHistory(sh, ah, rh, ih, aih, discount(mdp), exception, backtrace)
+    return SimHistory(promote_history(history), discount(mdp), exception, backtrace)
 end
 
-# function get_initialstate(sim::Simulator, initialstate_dist)
-#     return rand(sim.rng, initialstate_dist)
-# end
-# 
-# function get_initialstate(sim::Simulator, mdp::Union{MDP,POMDP})
-#     return initialstate(mdp, sim.rng)
-# end
-
-# this is kind of a hack in cases where the belief isn't stable
-push_belief(bh::Vector{T}, b::T) where T = push!(bh, b)
-function push_belief(bh::Vector{T}, b::B) where {B, T}
-    if !(T isa Union) # if T is not already a Union, try making a Union of the two types; don't jump straight to Any
-        new = Vector{Union{T,B}}(undef, length(bh)+1)
-    else
-        new = Vector{promote_type(T, B)}(undef, length(bh)+1)
+function collect_history(it, cap_ex::Val{true}, prog::Union{Progress,Nothing})
+    exception = nothing
+    backtrace = nothing
+    history = NamedTuple[] # capturing part of the history is more important than this having a concrete type
+    try
+        for step in it
+            push!(history, step)
+            if prog !== nothing
+                next!(prog)
+            end
+        end
+    catch ex
+        exception = ex
+        backtrace = catch_backtrace()
     end
-    new[1:end-1] = bh
-    new[end] = b
-    return new
+    return history, exception, backtrace
+end
+
+collect_history(it, cap_ex::Val{false}, prog::Nothing) = collect(it), nothing, nothing
+function collect_history(it, cap_ex::Val{false}, prog::Progress)
+    h = collect(begin
+                    next!(prog)
+                    step
+                end for step in it)
+    return h, nothing, nothing
+end
+
+"""
+Promotes all NamedTuples in the history to the same type.
+"""
+function promote_history(hist::AbstractVector)
+    if isconcretetype(eltype(hist))
+        return hist
+    elseif isempty(hist) # note, from above, also does not have concrete type
+        return NamedTuple{(), Tuple{}}[]
+    else
+        # it would really astound me if this branch was type stable
+        names = fieldnames(first(hist))
+        types = fieldtypes(first(hist))
+        for step in hist
+            @assert fieldnames(step) == names
+            types = map(promote_type, types, fieldtypes(step))
+        end
+        newtype = NamedTuple{names, Tuple{types...}}
+        return convert(Vector{newtype}, hist)
+    end
 end
