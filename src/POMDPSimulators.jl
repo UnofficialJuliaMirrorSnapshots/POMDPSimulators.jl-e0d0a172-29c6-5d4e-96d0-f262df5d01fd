@@ -17,10 +17,7 @@ include("rollout.jl")
 
 export
     SimHistory,
-    POMDPHistory,
-    MDPHistory,
-    AbstractPOMDPHistory,
-    AbstractMDPHistory,
+    AbstractSimHistory,
     HistoryIterator,
     eachstep,
     state_hist,
